@@ -1,0 +1,172 @@
+---
+title: "Ke_HW1"
+output: pdf_document
+---
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+library(dplyr)
+library(plyr)
+library(lubridate)
+library(ggplot2)
+dir = "/"
+load("USvideos-1.RData")
+```
+
+# Problem 1: Create and Convert Objects
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+## Question 1 (1 point) ##
+num_vec = c(1, 2, 3, 4, 5, -1, -2, -3, -4, -5)
+num_vec
+
+## Question 2 (1 point) ##
+num_mat = matrix(c(1, 2, 4, 1, 3, 4, 2, 3, 0.1), nrow = 3, ncol = 3, byrow = TRUE)
+num_mat
+
+## Question 3 (2 points) ##
+data_frame = data.frame(UserID = c("U001", "U002", "U003"), Age = c(22, 17, 19), State = c("IN", "MD", "CA"), RegistrationDate = c(as.Date("2019-07-15"), as.Date("2019-07-19"), as.Date("2019-07-05")))
+data_frame
+
+str(data_frame)
+
+## Question 4 (1 point) ##
+lst = alist(num_vec, num_mat, data_frame)
+lst
+```
+
+
+# Problem 2: Vectorized Operations 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+#inc_yr1 = c(44000, 47000, 46000, 51000, 59000)
+
+## Question 1 (2 points) ##
+first_year = c(44000, 47000, 46000, 51000, 59000)
+inc_vec1 = first_year *1.015^3
+inc_vec1
+
+## Question 2 (2 points) ##
+years = c(4, 3, 6, 5, 3)
+inc_vec2 = first_year * 1.015^years
+inc_vec2
+
+## Question 3 (1 point) ##
+rates = c(1.015, 1.017, 1.013, 1.019, 1.021)
+inc_vec3 = first_year * rates^years
+inc_vec3
+```
+
+
+# Problem 3: Numeric Functions 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+
+## Question 1 (1 point) ##
+beta_vec = c(0.5, -1.2, 3.3)
+x1_vec= c(1, 17, 22)
+x2_vec = c(1, 6, 3)
+
+## Question 2 (2 points) ##
+val_y1 = x1 %*% beta_vec
+val_y1
+
+## Question 3 (2 points) ##
+val_y2 = 1/(1+ exp(-x2 %*% beta_vec))
+val_y2
+
+```
+
+
+
+# Problem 4: Data Frame Manipulation 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+
+## Question 1 (2 points) ##
+type_vec = c(class(USvideos$views), class(USvideos$likes), class(USvideos$dislikes), class(USvideos$comment_count), class(USvideos$channel_title))
+type_vec
+
+## Question 2 (2 points) ##
+row_idx_netflix =which(USvideos$channel_title == "Netflix", arr.ind = TRUE) 
+head(row_idx_netflix)
+length(row_idx_netflix)
+
+## Question 3 (6 points) ##
+USvideos_new = USvideos
+USvideos_new$ratio_like_to_view = USvideos_new$likes/USvideos_new$views
+head(USvideos_new$ratio_like_to_view)
+
+USvideos_new$ratio_cmt_to_view = USvideos_new$comment_count/USvideos_new$views
+head(USvideos_new$ratio_cmt_to_view)
+
+USvideos_new$sum_like_dislike = USvideos_new$likes+USvideos_new$dislikes
+head(USvideos_new$sum_like_dislike)
+
+
+## Question 4 ##
+
+
+```
+
+
+# Problem 5: Descriptive Analysis 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+## Question 1 (5 points) ##
+
+
+ggplot(USvideos_new) +
+  geom_histogram(aes(x = views)) +
+  labs(x = "Number of Views",
+       y = "Count",
+       title = "Number of Views of Each Movie") +
+  theme(axis.title = element_text(size = 14, color = "red")) + 
+  theme(plot.title = element_text(size = 16, color = "red")) 
+
+
+
+```
+
+
+
+
+# Problem 6: Statistics Functions 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+
+## Question 1 (5 points) ##
+mean_likes = mean(USvideos$likes)
+mean_likes
+median_likes = median(USvideos$likes)
+median_likes
+sd_likes = sd(USvideos$likes)
+sd_likes
+perc80_likes = quantile(USvideos$likes, 0.8)
+perc80_likes
+
+## Question 2 (1 point) ##
+val_uniq_ct = n_distinct(USvideos$channel_title)
+val_uniq_ct
+
+## Question 3 (4 points) ##
+val_most_freq_ct = head(names(sort(table(USvideos$channel_title), decreasing=TRUE)), 1)
+
+val_freq_mfct = head(sort(table(USvideos$channel_title), decreasing=TRUE), 1) 
+
+val_most_freq_ct
+val_freq_mfct
+
+```
+
+
+# Bonus Question: 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+library(plyr)
+
+video_summary <- ddply(USvideos, .(category_title), summarise,
+               tot_likes = sum(likes, na.rm = TRUE),
+               avg_dislikes = mean(dislikes, na.rm = TRUE),
+               num_movies = length(title)) %>%
+  rename(c("category_title" = "movie_category"))
+video_summary
+
+dim(video_summary)
+head(video_summary)
+
+```
+
+
