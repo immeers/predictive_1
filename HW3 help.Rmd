@@ -1,0 +1,954 @@
+---
+title: "Predictive Analytics: Prediction Framework"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+## Introduction
+
+In this R notebook, we will walk through the steps of creating a prediction framework using the Universal Bank dataset.
+The steps for regression and classification tasks are generally the same: we will use this framework for all models in class.
+
+\* If there is one code you should save from this class to use in the future, this is it!
+
+We will focus on predicting whether a customer will take a personal loan using both Linear and Logistic Regression models.
+The steps include:
+
+1\.
+Reading the dataset and performing exploratory data analysis (EDA).
+
+2\.
+Splitting the data into training and validation sets.
+
+3\.
+Training Linear and Logistic Regression models.
+Interpret the model results.
+
+4\.
+Evaluating the performance using metrics like accuracy, precision, and recall.
+
+5\.
+Performing Logistic Regression with cross-validation.
+
+6\.
+Making predictions on a new dataset (universalbank_newcustomer.csv).
+
+```{r setup, include=FALSE}
+# Load required libraries
+rm(list=ls())
+library(tidyverse)
+library(caret)
+library(MASS)
+library(corrplot)
+library(ROCR)
+library(e1071)
+library(dplyr)
+```
+
+## Step 1: Read the Dataset and Perform EDA
+
+### \* Make sure you perform the SAME data cleaning on BOTH **your train and test data. (Here,** bank_data and new_customers**)**
+
+------------------------------------------------------------------------
+
+```{r}
+# Read the dataset
+coachRatings <- read.csv("./coach_rating_train.csv")
+# Load new customer data
+coachRatings_test <- read.csv("./coach_test_without answer.csv")
+
+summary(coachRatings)
+head(coachRatings)
+#plot(coachRatings$review_helpful_count, coachRatings$knowledge) #high review helpful is good at differentiating 5 star coach
+
+#plot(coachRatings$review_helpful_count/coachRatings$numReviews, coachRatings$knowledge) #high review helpful is good at differentiating 5 star coach
+
+
+coachRatings[coachRatings$review_helpful_count > 30 & !is.na(coachRatings$review_helpful_count),]
+character_columns <- which(sapply(coachRatings, class) == "character")
+use_data1 <- coachRatings[,(-c(character_columns))] #remove char cols, only for plots
+cor(use_data1, use = "complete.obs")
+```
+
+
+```{r}
+#Checking for correlation
+use_data1 %>% 
+  dplyr::select(knowledge, review_helpful_count) %>%
+  pivot_longer(cols = -knowledge) %>% 
+  # Plot every value against whiffs
+  ggplot(aes(value, knowledge)) +
+  geom_point() +
+  
+  geom_smooth(method = "lm") +
+  # Put each variable into its own plot:
+  facet_wrap(vars(name), scales = "free") +
+  theme_minimal() 
+
+
+#Remove outliers
+coachRatings <- coachRatings %>% filter(averageRating < 20) %>% filter(review_helpful_count < 45)
+use_data1 <- use_data1 %>% filter(averageRating < 20) %>% filter(review_helpful_count < 45)
+summary(use_data1)
+
+#Check for variable separation
+use_data1 %>% 
+  dplyr::select(highKnowledge, years_of_experience, averageRating) %>%
+  pivot_longer(cols = -highKnowledge) %>% 
+  ggplot(aes(x = value, fill =highKnowledge)) +
+  geom_density() +
+  # Put each variable into its own plot:
+  facet_wrap(vars(name), scales = "free") +
+  theme_minimal() 
+
+```
+
+-   Data imputation
+
+    ```{r}
+    library(mice)
+  coachRatings$highKnowledge <- as.factor(coachRatings$knowledge > 4)
+  
+  feat_vars <- names(coachRatings[4:39]) #train for validation
+  imputed_values <- mice(data = coachRatings[, feat_vars], # Set dataset
+                          m = 1, # Set number of multiple imputations
+                          maxit = 20, # Set maximum number of iterations
+                          method = "cart", # Set method- classification and regression trees, few assumptions
+                          print = TRUE) # Set whether to print output or not
+  coachRatings[,feat_vars] <- complete(imputed_values, 1) # Extract imputed data
+    ```
+
+-   Handling missing data
+
+    ```{r}
+    summary(coachRatings)
+    coachRatings <- coachRatings[, -c(1,2,3)] #ids
+    coachRatings <- coachRatings[,-10] #time
+    coachRatings <-coachRatings[,-9] #knowledge
+    ```
+    
+```{r}
+library(splitstackshape)
+library(xgboost)
+library(Matrix)
+set.seed(123456) # Set seed
+# Perform stratified sampling
+strat_vars <- c(names(coachRatings[character_columns]), "highKnowledge")
+split_dat <- stratified(coachRatings, # Set dataset
+                         group = strat_vars, # Set variables to use for stratification
+                         size = 0.2,  # Set size of test set
+                         bothSets = TRUE ) # Return both training and test sets
+# Extract train data
+train_data <- split_dat[[2]]
+# Extract test data
+test_data <- split_dat[[1]]
+
+# Check size
+nrow(train_data)
+
+#char to factors
+train_data$city <- as.factor(tolower(train_data$city))
+train_data$state <- as.factor((train_data$state))
+train_data$social_media_presence <- as.factor((train_data$social_media_presence))
+train_data$coaching_style <- as.factor((train_data$coaching_style))
+
+#make sparse matrix (dummy vars for characters)
+train_label <- as.numeric(train_data$highKnowledge)-1
+sparse_matrix <- sparse.model.matrix(highKnowledge ~ ., data = train_data)[,-1]
+
+test_label <- as.numeric(test_data$highKnowledge)-1
+sparse_matrix_test <- sparse.model.matrix(highKnowledge ~ ., data = test_data)[,-1]
+
+
+#create train matrix
+dtrain <- xgb.DMatrix(data = as.matrix(sparse_matrix), label = train_label)
+# Create test matrix
+dtest <- xgb.DMatrix(data = as.matrix(sparse_matrix_test), label = test_label)
+```
+
+```{r First boost to test ntrees}
+
+##NEED TO SET ETA MUCH HIGHER
+set.seed(111111)
+bst_1 <- xgboost(data = dtrain, # Set training data
+               
+               nrounds = 500, # Set number of rounds
+               
+               verbose = 1, # 1 - Prints out fit
+                print_every_n = 20, # Prints out result every 20th iteration
+               
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "error") # Set evaluation metric to use
+
+
+plot_data <- bst_1$evaluation_log[,c("iter", "train_error")]
+```
+    * Visualize and decide the optimal number of iterations for XGBoost.(Plot the error curve against the number of iterations) (2 marks)
+
+```{r}
+g_7 <- ggplot(plot_data, aes(x = iter, y = train_error))+
+  geom_smooth(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+g_7
+```
+
+
+* Tune the eta parameter for XGboost
+
+```{r Tune ETA}
+
+set.seed(111111)
+bst_mod_2 <- xgboost(data = dtrain, # Set training data
+              
+              eta = 0.3, # Set learning rate
+              
+               
+              nrounds = 200, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+bst_mod_3 <- xgboost(data = dtrain, # Set training data
+              
+              eta = 0.1, # Set learning rate
+              
+               
+              nrounds = 200, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+bst_mod_4 <- xgboost(data = dtrain, # Set training data
+              
+              eta = 0.05, # Set learning rate
+              
+               
+              nrounds = 200, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+bst_mod_5 <- xgboost(data = dtrain, # Set training data
+              
+              eta = 0.01, # Set learning rate
+              
+               
+              nrounds = 200, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+# Extract results for model with eta = 0.3
+pd1 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "train_error")], rep(0.3, nrow(bst_mod_2$evaluation_log)))
+names(pd1)[3] <- "eta"
+# Extract results for model with eta = 0.1
+pd2 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "train_error")], rep(0.1, nrow(bst_mod_3$evaluation_log)))
+names(pd2)[3] <- "eta"
+# Extract results for model with eta = 0.05
+pd3 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "train_error")], rep(0.05, nrow(bst_mod_4$evaluation_log)))
+names(pd3)[3] <- "eta"
+# Extract results for model with eta = 0.01
+pd4 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "train_error")], rep(0.01, nrow(bst_mod_5$evaluation_log)))
+names(pd4)[3] <- "eta"
+
+# Join datasets
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4)
+# Converty ETA to factor
+plot_data$eta <- as.factor(plot_data$eta)
+
+# Plot points
+g_6 <- ggplot(plot_data, aes(x = iter, y = train_error, color = eta)) +
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate", color = "Learning \n Rate")  # Set labels
+g_6
+
+```
+
+```{r Validate}
+bst_preds <- predict(bst_mod_2, dtest) # Create predictions for test data
+roc_bst = roc(test_db$label, bst_preds)
+
+bst_pred_class <- rep("0", length(bst_preds))
+bst_pred_class[bst_preds_ >= 0.5] <- "1"
+    
+t <- table(bst_pred_class, test_db$label) # Create table
+confusionMatrix(t, positive = '1') # Produce confusion matrix
+
+```
+
+
+
+
+-   Normalization of variables
+
+    ```{r}
+    bank_data$Income_norm <- scale(bank_data$Income)
+    bank_data$Age_norm <- scale(bank_data$Age)
+    ```
+
+-   Feature engineering (create new variables, encode categorical variables)
+
+    ```{r}
+    # Feature engineering example: Create Income-to-Age Ratio
+    bank_data$Income_to_Age_Ratio <- bank_data$Income / bank_data$Age
+
+    ggplot(bank_data, aes(x = Income_to_Age_Ratio)) + 
+      geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") + 
+      ggtitle("Distribution of Income-to-Age Ratio")
+    ```
+
+### Decide which EDA you like to perform, and do the same for both datasets 
+
+Imputation
+
+```{r}
+bank_data$Income[is.na(bank_data$Income)] <- median(bank_data$Income, na.rm = TRUE)
+new_customers$Income[is.na(new_customers$Income)] <- median(new_customers$Income, na.rm = TRUE)
+```
+
+Normalization (standardization) of key numerical variables (e.g., Income, Age, Experience)
+
+```{r}
+# Apply scaling to both datasets
+bank_data$Income_norm <- scale(bank_data$Income)
+bank_data$Age_norm <- scale(bank_data$Age)
+bank_data$Experience_norm <- scale(bank_data$Experience)
+
+new_customers$Income_norm <- scale(new_customers$Income)
+new_customers$Age_norm <- scale(new_customers$Age)
+new_customers$Experience_norm <- scale(new_customers$Experience)
+```
+
+Create New Variables
+
+```{r}
+# Create a new variable for `Income-to-Age` ratio
+bank_data$Income_to_Age <- bank_data$Income / bank_data$Age
+new_customers$Income_to_Age <- new_customers$Income / new_customers$Age
+```
+
+Create a new variable to categorize income into brackets (e.g., low, medium, high)
+
+```{r}
+# Assuming you want to categorize Income into three levels
+bank_data$Income_bracket <- cut(bank_data$Income, 
+                                breaks = c(-Inf, 50, 100, Inf), 
+                                labels = c("Low", "Medium", "High"))
+new_customers$Income_bracket <- cut(new_customers$Income, 
+                                    breaks = c(-Inf, 50, 100, Inf), 
+                                    labels = c("Low", "Medium", "High"))
+```
+
+Create a binary variable to indicate whether a customer has a mortgage
+
+```{r}
+bank_data$Has_Mortgage <- ifelse(bank_data$Mortgage > 0, 1, 0)
+new_customers$Has_Mortgage <- ifelse(new_customers$Mortgage > 0, 1, 0)
+```
+
+Convert State to factor, only works with your HW3 dataset
+
+```{r}
+#train_data$State <- as.factor(train_data$State)
+#test_data$State <- as.factor(test_data$State)
+
+bank_data$Family <- as.factor(bank_data$Family)
+new_customers$Family <- as.factor(new_customers$Family)
+```
+
+Add a 'Year' column and convert to factor
+
+```{r}
+# Convert Year to factor
+bank_data$Year <- as.factor(bank_data$Year)
+new_customers$Year <- as.factor(new_customers$Year)
+```
+
+## Step 2: Split the Data into Training and Validation Sets
+
+We will split the data into 70% training and 30% validation sets.
+
+-   we can use the index method that we use in class
+
+-   R here has a very convenient package called createDataPartition() that does it for you.
+
+    -   we specify the outcome variable is personal.loan, with 70% of the entire data
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Split the data
+train_index <- createDataPartition(bank_data$Personal.Loan, p=0.7, list=FALSE)
+train_data <- bank_data[train_index, ]
+valid_data <- bank_data[-train_index, ]
+```
+
+## Step 3: Train Linear Regression Model to Predict Personal Loan
+
+We will train a Linear Regression Model using Linear Regression on the training data and evaluate it on the validation data.
+
+```{r}
+# Train the Linear Regression model
+linear_model <- lm(Personal.Loan ~ Income + Age + Experience + Family + CCAvg + Education + Mortgage + Securities.Account + CD.Account + Online + CreditCard, data=train_data)
+
+# Make predictions on the validation set
+linear_preds <- predict(linear_model, valid_data)
+# check on the first 5 predictions
+linear_preds[1:5]
+```
+
+You will see here that linear regression produces predictions that are negative!
+
+**This is the reason we don't use linear regression for classification tasks!**
+
+```{r}
+# Check for any negative predictions
+negative_predictions <- linear_preds[linear_preds < 0]
+# Check for any predictions larger than 1 
+large_predictions <- linear_preds[linear_preds > 1]
+
+length(negative_predictions)
+length(large_predictions)
+```
+
+Just for demonstration, we will use linear regression for now to make predictions, we can then check the **confusion matrix**:
+
+### Explanation of Confusion Matrix:
+
+1.  **True Positives (TP):** The number of customers who **actually took** a personal loan and were correctly **predicted** to take a loan by the model.
+    This is a successful prediction of the positive class.
+
+2.  **True Negatives (TN):** The number of customers who **did not take** a personal loan and were correctly **predicted** to not take a loan.
+    This is a successful prediction of the negative class.
+
+3.  **False Positives (FP):** The number of customers who **did not take** a personal loan but were incorrectly **predicted** to take one.
+    This is also known as a Type I error.
+
+4.  **False Negatives (FN):** The number of customers who **did take** a personal loan but were incorrectly **predicted** to not take one.
+    This is also known as a Type II error.
+
+### Key Metrics Derived from Confusion Matrix:
+
+-   **Accuracy:** The percentage of correct predictions (both True Positives and True Negatives) out of all predictions made.
+    A high accuracy indicates that the model is generally correct.​
+
+-   **Precision:** Out of all the customers predicted to take a loan (positive class), precision is the percentage that actually took the loan.
+    This is important in cases where false positives (incorrect positive predictions) need to be minimized.​
+
+-   **Recall (Sensitivity):** Out of all the customers who actually took a loan, recall is the percentage that were correctly predicted.
+    This is crucial in cases where false negatives (missed positive predictions) need to be minimized.​
+
+-   **F1 Score:** This is the harmonic mean of precision and recall, providing a balanced measure when both metrics are important.
+    It is useful when there is an uneven class distribution.
+
+```{r}
+# Convert predictions to binary (0 or 1)
+linear_preds_class <- ifelse(linear_preds > 0.5, 1, 0)
+
+# Evaluate model accuracy, precision, recall
+confusionMatrix(as.factor(linear_preds_class), as.factor(valid_data$Personal.Loan))
+```
+
+## Step 4: Train Logistic Regression Model to Predict Personal Loan
+
+Next, we will train a Logistic Regression model and evaluate its performance.
+
+```{r}
+# Train the Logistic Regression model
+logit_model <- glm(Personal.Loan ~ Income + Age + Experience + Family + CCAvg + Education + Mortgage + Securities.Account + CD.Account + Online + CreditCard, data=train_data, family=binomial)
+
+# Make predictions on the validation set
+logit_preds <- predict(logit_model, valid_data, type="response")
+
+# Convert predictions to binary (0 or 1)
+logit_preds_class <- ifelse(logit_preds > 0.5, 1, 0)
+
+# Evaluate model accuracy, precision, recall
+confusionMatrix(as.factor(logit_preds_class), as.factor(valid_data$Personal.Loan))
+```
+
+## Step 5: Evaluate Model Performance
+
+We evaluate the performance of both models (Linear and Logistic) using Accuracy, Precision, and Recall.
+
+```{r}
+# Confusion Matrix for Linear Model
+linear_confusion <- confusionMatrix(as.factor(linear_preds_class), as.factor(valid_data$Personal.Loan))
+linear_confusion
+
+# Confusion Matrix for Logistic Model
+logit_confusion <- confusionMatrix(as.factor(logit_preds_class), as.factor(valid_data$Personal.Loan))
+logit_confusion
+```
+
+## Step 6: Perform Logistic Regression with Cross-Validation
+
+We will now perform cross-validation for the logistic regression model.
+We use the `caret` package to train the logistic regression model with cross-validation, helping ensure better generalization of the model.
+
+-   **`trainControl(method = "cv", number = 5)`**: This sets up the cross-validation process.
+    In this case, 5-fold cross-validation is used, meaning the data will be split into 5 parts, and the model will be trained on 4 parts while the remaining 1 part is used for validation.
+    This process is repeated 5 times, and the results are averaged to reduce overfitting.
+
+-   **`train()`**: The `train()` function from the `caret` package is used to train the logistic regression model.
+    The formula `Personal.Loan ~ ...` specifies that the target variable is `Personal.Loan`, and the predictors are the customer attributes like `Income`, `Age`, `Experience`, etc.
+    The `method = "glm"` argument specifies that we are using logistic regression (`glm` for Generalized Linear Model).
+
+```{r}
+# Load the required library
+library(caret)
+
+# Ensure that the target variable is a factor with two levels: "no" and "yes"
+train_data$Personal.Loan <- factor(train_data$Personal.Loan, levels = c(0, 1), labels = c("no", "yes"))
+
+# Define the training control with accuracy as the metric
+train_control <- trainControl(method = "cv",      # 5-fold cross-validation
+                              number = 5,
+                              classProbs = TRUE,  # Needed for classification problems
+                              summaryFunction = defaultSummary)  # Use defaultSummary for accuracy
+
+# Train the logistic regression model with cross-validation
+cv_logit_model <- train(Personal.Loan ~ Income + Age,
+                        data = train_data,
+                        method = "glm", 
+                        family = binomial,
+                        trControl = train_control,
+                        metric = "Accuracy")  # Use "Accuracy" as the main performance metric
+
+# Summary of cross-validation results
+print(cv_logit_model)
+
+```
+
+## Step 6.5: Choose the best model:
+
+This step is where we compare different models, variables, check interpretations, etc, and select and decide on which model we think is the best:
+
+```{r}
+# Train a KNN model 
+
+set.seed(123)  # Ensure reproducibility
+
+train_data$Personal.Loan <- as.factor(train_data$Personal.Loan)
+
+
+knn_model <- train(
+  Personal.Loan ~ Income + Age,, 
+  data = train_data, 
+  method = "knn", 
+  tuneLength = 5, 
+  trControl = trainControl(method = "cv", number = 5),
+  metric = "Accuracy"
+)
+
+# Print model summary
+print(knn_model)
+
+# Make predictions on the test data
+knn_predictions <- predict(knn_model, newdata = valid_data)
+
+```
+
+```{r}
+# Train the logistic regression model with cross-validation
+cv_logit_model2 <- train(Personal.Loan ~ Income + Age + Experience + Family + CCAvg + Education + Mortgage + Securities.Account + CD.Account + Online + CreditCard, 
+                        data = train_data,
+                        method = "glm", 
+                        family = binomial,
+                        trControl = train_control,
+                        metric = "Accuracy")  # Use "Accuracy" as the main performance metric
+
+# Summary of cross-validation results
+print(cv_logit_model2)
+```
+
+## Step 7: Make Predictions on a New Dataset
+
+We will use the logistic regression model to make predictions on the new customer dataset.
+
+```{r}
+# Load the new customer dataset
+new_customers <- read.csv("universalbank_newcustomer.csv")
+
+# Make predictions on the new dataset using the logistic regression model
+new_preds <- predict(cv_logit_model2, new_customers, type = "prob")
+```
+
+```{r}
+# Convert probabilities to binary class labels (0 or 1)
+# We use the second column of 'new_preds' which corresponds to the probability of "yes" (Personal Loan)
+new_customers$Personal.Loan.Predicted <- ifelse(new_preds[, "yes"] > 0.5, 1, 0)
+
+# Display the first few rows of the new dataset with predictions
+head(new_customers)
+```
+
+Ensemble voting:
+
+```{r}
+knn_predictions <- predict(knn_model, newdata = new_customers)
+logit_predictions <- predict(cv_logit_model2, newdata = new_customers)
+#majority_vote <- ifelse(knn_predictions == 1 & logit_predictions == 1, 1, 0)
+majority_vote <- ifelse(knn_predictions == 1 | logit_predictions == 1, 1, 0)
+majority_vote
+```
+
+```{r}
+# If hypothetically you have three models: 
+majority_vote <- ifelse(
+  (knn_predictions == 1) + (logit_predictions == 1) + (tree_predictions == 1) >= 2, 1, 0
+)
+```
+
+### Advanced material: Model deployment (hint hint, final project)
+
+we can save a model so that next time we need it, we can just use it instead of re-training our model
+
+```{r}
+# Save the trained model to a file
+saveRDS(cv_logit_model2, file = "loan_model.rds")
+```
+
+#### Load the Model and Make Predictions on New Data
+
+In the future, when you need to make predictions with the trained model, you can simply load the model from the saved file using `readRDS()`.
+
+```{r}
+# Load the saved model
+deployed_model <- readRDS("loan_model.rds")
+
+# Make predictions using the loaded model
+new_preds <- predict(deployed_model, new_customers, type = "prob")
+
+# Convert probabilities to binary class (0 or 1) using a 0.5 threshold
+new_customers$Personal.Loan.Predicted <- ifelse(new_preds[, "yes"] > 0.5, 1, 0)
+
+# View the predictions
+head(new_customers)
+```
+
+Model deployment is the process of integrating a trained machine learning model into production systems, where it can be used to make predictions on real-time or batch data.
+Here's how a firm or a data scientist would use the deployment process in practical settings:
+
+#### **Use Case: Predicting Loan Acceptance for New Customers**
+
+Let’s consider a scenario where a bank has built a logistic regression model to predict whether a customer is likely to accept a personal loan.
+Once the model is trained, it needs to be deployed so that it can be used by the bank's customer service team, website, or mobile app to predict loan acceptance for new applicants in real time or in batch processing.
+
+Here’s how the deployment process would be used:
+
+### Step 1: **Model Training and Evaluation**
+
+Before deployment, data scientists will:
+
+-   Train and evaluate the model (e.g., logistic regression) on historical data.
+
+-   Ensure that the model is optimized and provides reliable predictions using metrics such as accuracy, ROC AUC, precision, and recall.
+
+Once they are confident in the model's performance, they move on to deployment.
+
+### Step 2: **Saving the Model for Future Use**
+
+In many firms, machine learning models are retrained periodically (weekly, monthly, or quarterly) with new data.
+Each time a model is trained, the latest version of the model is saved, as shown in the code below:
+
+`saveRDS(logit_model, file = "logistic_model.rds")`
+
+By saving the model:
+
+-   Data scientists ensure they don't have to retrain the model every time they want to make predictions.
+
+-   This also allows for easier version control, where older models can be saved with different filenames (e.g., "logistic_model_v1.rds", "logistic_model_v2.rds").
+
+### Step 3: **Deploying the Model in a Production Environment**
+
+Once the model is saved, it is ready to be integrated into the bank's production system.
+This is the key step where the model becomes a valuable tool for business operations.
+
+There are a few common deployment strategies:
+
+1.  **Batch Processing**:
+
+    -   Firms with large customer databases (e.g., thousands of loan applicants) can load the saved model and run it periodically (e.g., nightly or weekly) on a new batch of customers.
+
+    -   In this scenario, the data scientist would automate a process to load the new customer data, run predictions using the saved model, and store the results in a database.
+
+    Example:
+
+    ``` r
+    # Load saved model
+    deployed_model <- readRDS("logistic_model.rds")
+
+    # Predict loan acceptance for a batch of new customers
+    new_preds <- predict(deployed_model, new_customers, type = "prob")
+
+    # Store predictions back into the database for use by sales teams
+    # Database logic or writing to a CSV 
+    ```
+
+    2.  **Real-Time API Deployment**:
+
+    -   For real-time predictions, the model can be deployed using an API (e.g., using `plumber` in R or `Flask` in Python). This would allow the model to be called whenever a new customer applies for a loan, making it possible for the website, mobile app, or customer service representative to get immediate feedback.
+
+    Example:
+
+    -   A customer applies for a loan online.
+
+    -   The system sends the customer data to the API, which uses the deployed model to generate a prediction.
+
+    -   The API responds with a loan acceptance probability, and the system decides whether to offer the loan.
+
+    Example with `plumber` in R:
+
+    ``` r
+    # Load model inside the API
+    #* @post /predict
+    function(new_data) {
+      deployed_model <- readRDS("logistic_model.rds")
+      prediction <- predict(deployed_model, new_data, type = "prob")
+      return(prediction)
+    }
+
+    # Run the API
+    r <- plumb("api.R")
+    r$run(port = 8000)
+    ```
+
+2.  **Embedding in Interactive Apps (Shiny)**:
+
+    -   A data scientist could build a **Shiny app** that allows non-technical users (e.g., customer support or sales teams) to interact with the model. Users could input customer data manually, and the app would display predictions based on the model in real-time.
+
+    Example in a Shiny app:
+
+    ```{r}
+    library(shiny)
+    library(caret)
+
+    # UI for the Shiny app
+    ui <- fluidPage(
+      titlePanel("Personal Loan Prediction"),
+      
+      sidebarLayout(
+        sidebarPanel(
+          numericInput("Income", "Income (in thousands)", value = 50, min = 0),
+          numericInput("Age", "Age", value = 30, min = 18),
+          numericInput("Experience", "Years of Experience", value = 5, min = 0),
+          numericInput("Family", "Family Size", value = 1, min = 1, max = 4),
+          numericInput("CCAvg", "Credit Card Average Spend (in thousands)", value = 1.5, min = 0),
+          selectInput("Education", "Education Level", choices = list("Undergrad" = 1, "Graduate" = 2, "Advanced/Professional" = 3)),
+          numericInput("Mortgage", "Mortgage Value (in thousands)", value = 0, min = 0),
+          selectInput("Securities.Account", "Securities Account", choices = list("No" = 0, "Yes" = 1)),
+          selectInput("CD.Account", "CD Account", choices = list("No" = 0, "Yes" = 1)),
+          selectInput("Online", "Online Banking", choices = list("No" = 0, "Yes" = 1)),
+          selectInput("CreditCard", "Credit Card", choices = list("No" = 0, "Yes" = 1)),
+          
+          actionButton("predict", "Predict Loan Acceptance")
+        ),
+        
+        mainPanel(
+          textOutput("prediction_result")
+        )
+      )
+    )
+
+    # Server logic for the Shiny app
+    server <- function(input, output) {
+      # Load the saved logistic regression model
+      model <- readRDS("loan_model.rds")
+      
+      # Observe when the "Predict" button is clicked
+      observeEvent(input$predict, {
+        
+        # Create a new data frame from the user inputs
+        new_data <- data.frame(
+          Income = input$Income,
+          Age = input$Age,
+          Experience = input$Experience,
+          Family = input$Family,
+          CCAvg = input$CCAvg,
+          Education = as.numeric(input$Education),
+          Mortgage = input$Mortgage,
+          Securities.Account = as.numeric(input$Securities.Account),
+          CD.Account = as.numeric(input$CD.Account),
+          Online = as.numeric(input$Online),
+          CreditCard = as.numeric(input$CreditCard)
+        )
+        
+        # Use the loaded model to predict the probability of loan acceptance
+        prediction <- predict(model, new_data, type = "prob")
+        
+        # Convert probability into a predicted class (0 or 1)
+        loan_accepted <- ifelse(prediction[, "yes"] > 0.5, "Loan Approved", "Loan Denied")
+        
+        # Output the prediction result to the UI
+        output$prediction_result <- renderText({
+          paste("Prediction:", loan_accepted)
+        })
+      })
+    }
+
+    # Run the Shiny app
+    shinyApp(ui = ui, server = server)
+
+    ```
+
+### We can also make it prettier:
+
+Let's make the UI more pretty, and also make a pop up window that says accept or deny, and also make sliders for variable (Chatgpt will do this very well)
+
+```{r}
+library(shiny)
+library(caret)
+library(shinyWidgets)
+
+# UI for the Shiny app
+ui <- fluidPage(
+  titlePanel(h1("Personal Loan Prediction", align = "center")),
+  
+  # Add some styling and layout
+  tags$head(
+    tags$style(HTML("
+      body {background-color: #f0f8ff;}
+      .titlePanel {font-family: Arial; color: #2c3e50; text-align: center;}
+      .well {background-color: #e6f7ff; padding: 20px; border-radius: 10px;}
+      #predict {background-color: #1abc9c; color: white; font-size: 18px;}
+    "))
+  ),
+  
+  sidebarLayout(
+    sidebarPanel(
+      # Using sliders for numeric input
+      sliderInput("Income", "Income (in thousands)", min = 0, max = 200, value = 50, step = 1),
+      sliderInput("Age", "Age", min = 18, max = 70, value = 30, step = 1),
+      sliderInput("Experience", "Years of Experience", min = 0, max = 50, value = 5, step = 1),
+      sliderInput("Family", "Family Size", min = 1, max = 4, value = 1, step = 1),
+      sliderInput("CCAvg", "Credit Card Average Spend (in thousands)", min = 0, max = 10, value = 1.5, step = 0.1),
+      selectInput("Education", "Education Level", choices = list("Undergrad" = 1, "Graduate" = 2, "Advanced/Professional" = 3)),
+      sliderInput("Mortgage", "Mortgage Value (in thousands)", min = 0, max = 500, value = 0, step = 1),
+      
+      # Select input for categorical variables
+      pickerInput("Securities.Account", "Securities Account", choices = list("No" = 0, "Yes" = 1), multiple = FALSE),
+      pickerInput("CD.Account", "CD Account", choices = list("No" = 0, "Yes" = 1), multiple = FALSE),
+      pickerInput("Online", "Online Banking", choices = list("No" = 0, "Yes" = 1), multiple = FALSE),
+      pickerInput("CreditCard", "Credit Card", choices = list("No" = 0, "Yes" = 1), multiple = FALSE),
+      
+      # Action button for prediction
+      actionButton("predict", "Predict Loan Acceptance", class = "btn btn-success", icon = icon("calculator"))
+    ),
+    
+    mainPanel(
+      # Output for showing the prediction
+      h3("Prediction Result:", align = "center"),
+      textOutput("prediction_result", container = span),
+      
+      # Placeholder for the modal popup
+      verbatimTextOutput("modal_popup")
+    )
+  )
+)
+
+# Server logic for the Shiny app
+server <- function(input, output, session) {
+  # Load the saved logistic regression model
+  model <- readRDS("loan_model.rds")
+  
+  # Observe when the "Predict" button is clicked
+  observeEvent(input$predict, {
+    # Create a new data frame from the user inputs
+    new_data <- data.frame(
+      Income = input$Income,
+      Age = input$Age,
+      Experience = input$Experience,
+      Family = input$Family,
+      CCAvg = input$CCAvg,
+      Education = as.numeric(input$Education),
+      Mortgage = input$Mortgage,
+      Securities.Account = as.numeric(input$Securities.Account),
+      CD.Account = as.numeric(input$CD.Account),
+      Online = as.numeric(input$Online),
+      CreditCard = as.numeric(input$CreditCard)
+    )
+    
+    # Use the loaded model to predict the probability of loan acceptance
+    prediction <- predict(model, new_data, type = "prob")
+    
+    # Convert probability into a predicted class (0 or 1)
+    loan_accepted <- ifelse(prediction[, "yes"] > 0.5, "Loan Approved", "Loan Denied")
+    
+    # Output the prediction result to the UI
+    output$prediction_result <- renderText({
+      paste("Prediction:", loan_accepted)
+    })
+    
+    # Trigger a modal dialog pop-up
+    showModal(modalDialog(
+      title = "Loan Prediction",
+      paste("Your loan prediction is:", loan_accepted),
+      easyClose = TRUE,
+      footer = NULL
+    ))
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui = ui, server = server)
+```
+
+### Step 4: **Monitoring and Maintaining the Model**
+
+After deployment, the firm’s data science team will:
+
+-   **Monitor model performance**: Regularly check the model's predictions to ensure they align with actual outcomes.
+    For instance, if many customers who were predicted to accept loans are rejecting them, the model might need retraining.
+
+-   **Retrain the model**: As new data becomes available (e.g., new loan applicants and their outcomes), data scientists will periodically retrain the model to ensure its predictions remain accurate and relevant.
+
+### Step 5: **Making Business Decisions Based on the Model**
+
+Firms use deployed models to drive business strategies:
+
+-   **Personalized Offers**: The bank can use predictions to tailor marketing offers to customers likely to accept loans.
+
+-   **Risk Management**: By predicting the probability of loan acceptance or rejection, the bank can better assess risks and adjust terms (interest rates, credit limits) accordingly.
+
+-   **Improved Customer Service**: Customer service teams can access real-time model predictions to assist customers efficiently with loan applications.
