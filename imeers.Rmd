@@ -1,0 +1,387 @@
+---
+title: "Lasso for Coaching Ratings"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Reading data
+
+```{r}
+library(naniar) # Load nanair for missing data visualization
+library(mice) #Imputation
+library(caret)
+library(glmnet)
+library(corrr)
+```
+
+```{r Lasso}
+#setwd("")
+dataset <- read.csv("./coach_rating_train.csv")
+
+  summary(dataset)
+  head(dataset)
+  names(dataset)
+  #NAs in average rating and in rating popularity combined
+  unique(dataset$averageRating)
+  unique(dataset$coach_popularity)
+  which(is.na(dataset$averageRating))
+  which(is.na(dataset$rating_popularity_combined))
+  
+  feat_vars <- names(dataset[3:39]) #train for validation
+
+  #vis_miss(dataset[,feat_vars]) #all rating_popularity are missing when averageRatings are missing
+  dataset$highKnowledge <- as.numeric(dataset$knowledge > 4)
+  
+  
+  imputed_values <- mice(data = dataset[, feat_vars], # Set dataset
+                          m = 1, # Set number of multiple imputations
+                          maxit = 20, # Set maximum number of iterations
+                          method = "cart", # Set method- classification and regression trees, few assumptions
+                          print = TRUE) # Set whether to print output or not
+  dataset[,feat_vars] <- complete(imputed_values, 1) # Extract imputed data
+  summary(dataset)
+  
+  
+  
+  # Get indexes of columns with class 'character'
+  character_columns <- which(sapply(dataset, class) == "character")
+  use_data <- dataset[,(-c(character_columns))] #remove char cols
+  print(names(use_data))
+  use_data <- use_data[,-c(1,2,33)] #remove IDS and collinear, train for validation
+
+
+
+```
+
+```{r Lasso- train for validation}
+#Lasso so omit categorical vars and remove IDs because they're not helpful
+
+
+names(use_data)
+#Create train and validation
+set.seed(123)
+
+train_index <- createDataPartition(use_data$highKnowledge, p = 0.8, list = FALSE)
+train_data <- use_data[train_index, ]
+test_data <- use_data[-train_index, ]
+
+# Check the dimensions
+dim(train_data)
+dim(test_data)
+
+#LASSO
+#for lasso must omit response variable too
+
+# Scale explanatory variables
+x_vars <- scale(train_data[,-c(7, 31)]) #validation
+```
+
+```{r Train validation model}
+
+#x_vars <- scale(use_data[,-c(7, 31)]) 
+
+names(x_vars)
+# Create sequence of lambda values
+lambda_seq <- seq(from = 0.1, to = 10, by = 0.1)
+
+dim(x_vars)
+
+# Run lasso cross validation
+fit_lasso <- cv.glmnet(x = x_vars, # Set explanatory variables
+                   y = train_data$highKnowledge, # Set response variable
+                   #y= use_data$highKnowledge,
+                   alpha = 1, # Set alpha as 1 for lasso
+                   lambda = lambda_seq, # Set lambda as sequence of lambda values
+                   nfolds = 10) # Set number of folds as 10
+
+#visualise coefficients
+coef(fit_lasso)
+
+#find best lambda
+best_lam <- fit_lasso$lambda.1se # Extract best lambda
+best_lam # View best lambda
+
+fit_lasso2 <- glmnet(x = x_vars, # Set explanatory variables
+                   y = train_data$highKnowledge, # Set response variable
+                   #y= use_data$highKnowledge,
+                   alpha = 1, # Set alpha as 1 for lasso
+                   lambda = best_lam) # Set lambda as sequence of lambda values
+
+coef(fit_lasso2)
+
+
+##I have now trained model fit_lasso2 on train-test split
+
+```
+
+```{r Validating model for training}
+#Predict test data
+predictions <- predict(fit_lasso2, s = best_lam, newx = scale(test_data[,-c(7, 31)]))
+
+prediction1 = as.numeric(predictions > 0.6)
+truth <- test_data$highKnowledge
+
+# compare prediction result
+xtab <- table(prediction1, truth)
+result1<-confusionMatrix(xtab)
+result1$overall[['Accuracy']]
+result1
+
+
+thresholds <- seq(0.5, 0.7, by = 0.01)
+threshold_results <- data.frame(Threshold = thresholds, Accuracy = NA)
+
+for (i in seq_along(thresholds)) {
+  threshold <- thresholds[i]
+  predictions <- predict(fit_lasso2, s = best_lam, newx = scale(test_data[,-c(7, 31)]))
+
+  prediction1 = as.numeric(predictions > threshold)
+  
+  # compare prediction result
+  xtab <- table(prediction1, truth)
+  result1<-confusionMatrix(xtab)
+  result1$overall[['Accuracy']]
+  result1
+  threshold_results$Accuracy[i] <- result1$overall[['Accuracy']]
+  
+
+}
+threshold_results
+write.csv(c("fit_lasso2", "0.60", "0.79"),file= "tennisResults.csv")
+
+```
+
+Run once down to here with train-test split to validate model
+Now, run again on full dataset to train model for test_without_answers
+
+```{r Train whole model}
+
+x_vars <- scale(use_data[,-c(7, 31)]) 
+
+names(x_vars)
+# Create sequence of lambda values
+lambda_seq <- seq(from = 0.1, to = 10, by = 0.1)
+
+dim(x_vars)
+
+# Run lasso cross validation
+fit_lasso <- cv.glmnet(x = x_vars, # Set explanatory variables
+                   #y = train_data$highKnowledge, # Set response variable
+                   y= use_data$highKnowledge,
+                   alpha = 1, # Set alpha as 1 for lasso
+                   lambda = lambda_seq, # Set lambda as sequence of lambda values
+                   nfolds = 10) # Set number of folds as 10
+
+#visualise coefficients
+coef(fit_lasso)
+
+#find best lambda
+best_lam <- fit_lasso$lambda.1se # Extract best lambda
+best_lam # View best lambda
+
+fit_lasso2 <- glmnet(x = x_vars, # Set explanatory variables
+                   #y = train_data$highKnowledge, # Set response variable
+                   y= use_data$highKnowledge,
+                   alpha = 1, # Set alpha as 1 for lasso
+                   lambda = best_lam) # Set lambda as sequence of lambda values
+
+coef(fit_lasso2)
+
+saveRDS(fit_lasso2, file = "lasso_model.rds")
+
+##I have now trained model fit_lasso2 on full data set
+
+```
+
+
+
+
+```{r Predict test without answers}
+
+#Writing results so far
+dataset_test <- read.csv("./coach_test_without answer.csv")
+
+# predict on test data and check the first 5 predictions, use threshold 0.6
+
+feat_vars1 <- names(dataset_test[3:38]) #testset
+
+
+#must impute first because same nas
+imputed_values1 <- mice(data = dataset_test[, feat_vars1], # Set dataset
+                          m = 1, # Set number of multiple imputations
+                          maxit = 20, # Set maximum number of iterations
+                          method = "cart", # Set method- classification and regression trees, few assumptions
+                          print = TRUE) # Set whether to print output or not
+dataset_test[,feat_vars1] <- complete(imputed_values1, 1) # Extract imputed data
+summary(dataset_test)
+
+#remove ids and collinear, classes
+# Get indexes of columns with class 'character'
+character_columns1 <- which(sapply(dataset_test, class) == "character")
+use_data1 <- dataset_test[,(-c(character_columns1))] #remove char cols
+print(names(use_data1))
+use_data1 <- use_data1[,-c(1,2,32)] #remove IDS and collinear, test
+dim(use_data1)
+
+#predict on fully trained model
+prediction_test <- predict(fit_lasso2, s = best_lam, newx = scale(use_data1))
+prediction_test = as.numeric(prediction_test > 0.6) #0.6 was best threshold
+
+prediction_test[0:5]
+
+newdf_test_out <- cbind(dataset_test[c("reviewID")], prediction_test)
+
+write.csv(newdf_test_out, file="imeers_muscletank1.csv", row.names=FALSE)
+
+  
+```
+
+
+##BASELINE
+### Creating the outcome variable
+
+```{r}
+coachRatings <- read.csv("./coach_rating_train.csv")
+
+coachRatings$highKnowledge <- as.numeric(coachRatings$knowledge > 4)
+summary(coachRatings$highKnowledge)
+```
+
+### Starter Logit Model
+
+```{r}
+model1 <- glm(highKnowledge~numReviews*coach_popularity, family=binomial("logit"), data=coachRatings) 
+summary(model1)
+```
+
+```{r}
+# check
+predictions <- predict.glm(model1, coachRatings[1:5,], type="response")
+predictions
+```
+
+```{r}
+# compared to actual 
+coachRatings[1:5,]$highKnowledge
+```
+
+### Validate results
+
+```{r}
+prediction1 <- predict.glm(model1, coachRatings, type="response")
+prediction1 = as.numeric(prediction1 > 0.5)
+truth <- coachRatings$highKnowledge
+```
+
+```{r}
+# compare prediction result
+xtab <- table(prediction1, truth)
+result1<-confusionMatrix(xtab)
+result1$overall[['Accuracy']]
+```
+
+### Make predictions
+
+```{r}
+coachRatings_test <- read.csv("./coach_test_without answer.csv")
+```
+
+```{r}
+# predict on test data and check the first 5 predictions 
+prediction_test <- predict.glm(model1, coachRatings_test, type="response")
+prediction_test = as.numeric(prediction_test > 0.5)
+prediction_test[0:5]
+```
+
+## Submit predictions
+
+```{r}
+newdf_test_out <- cbind(coachRatings_test[c("reviewID")], prediction_test)
+#write.csv(newdf_test_out, file="imeers_linear.csv", row.names=FALSE)
+```
+
+
+```{r TESTING IMPUTE METHODS}
+
+# #Finding the most correlated vars to use in imputation of averageRating (which contains NAs)
+# avRat <- cor(no_nas1, use = "complete.obs")[, "averageRating"]
+# # Sort correlations in descending order and exclude 'averageRating' itself
+# sorted_correlations <- sort(abs(avRat), decreasing = TRUE)
+# sorted_correlations <- sorted_correlations[names(sorted_correlations) != "averageRating" & names(sorted_correlations) != "highKnowledge" & names(sorted_correlations) != "rating_popularity_combined"]
+# 
+# # Get the top 10 most correlated variables
+# top_10_avRat <- names(head(sorted_correlations, 10))
+# top_10_avRat[11] <- 'averageRating'
+# 
+# #Impute NAs
+# #multiple imputation by chained equations
+# imputed_values <- mice(data = coachRatings[, top_10_avRat], # Set dataset
+#                         m = 1, # Set number of multiple imputations
+#                         maxit = 10, # Set maximum number of iterations
+#                         method = "cart", # Set method- classification and regression trees, few assumptions
+#                         print = TRUE) # Set whether to print output or not
+# 
+# coachRatings[,top_10_avRat] <- complete(imputed_values, 1) # Extract imputed data
+# summary(coachRatings$averageRating)
+# 
+# 
+# 
+# #Finding the most correlated vars to use in imputation of rating_popularity (which contains NAs)
+# ratPop <- cor(no_nas1, use = "complete.obs")[, "rating_popularity_combined"]
+# # Sort correlations in descending order and exclude 'averageRating' itself
+# sorted_correlations <- sort(abs(ratPop), decreasing = TRUE)
+# sorted_correlations <- sorted_correlations[names(sorted_correlations) != "rating_popularity_combined" & names(sorted_correlations) != "highKnowledge"]
+# 
+# # Get the top 10 most correlated variables
+# top_10_ratPop <- names(head(sorted_correlations, 10))
+# top_10_ratPop[11] <- 'rating_popularity_combined'
+# pred_matrix <- make.predictorMatrix( coachRatings[, top_10_ratPop])
+# 
+# pred_matrix["rating_popularity_combined", "rating_popularity_combined"] <- 0
+# 
+# #Impute NAs
+# #multiple imputation by chained equations
+# imputed_values1 <- mice(data = coachRatings[, top_10_ratPop], # Set dataset
+#                         predictorMatrix = pred_matrix,
+#                         m = 1, # Set number of multiple imputations
+#                         maxit = 10, # Set maximum number of iterations
+#                         method = "cart", # Set method- classification and regression trees, few assumptions
+#                         print = TRUE) # Set whether to print output or not
+# 
+# 
+# dim(top_10_ratPop)
+# 
+# coachRatings[,top_10_ratPop] <- complete(imputed_values1, 1) # Extract imputed data
+# summary(coachRatings)
+# 
+# 
+# 
+# #Finding the most correlated vars to use in imputation of years_of_experience (which contains NAs)
+# exYears <- cor(no_nas1, use = "complete.obs")[, "years_of_experience"]
+# # Sort correlations in descending order and exclude 'years_of_experience' itself
+# sorted_correlations <- sort(abs(exYears), decreasing = TRUE)
+# sorted_correlations <- sorted_correlations[names(sorted_correlations) != "years_of_experience" & names(sorted_correlations) != "highKnowledge"]
+# 
+# # Get the top 10 most correlated variables
+# top_10_exYears <- names(head(sorted_correlations, 10))
+# top_10_exYears[11] <- 'years_of_experience'
+# 
+# #Impute NAs
+# #multiple imputation by chained equations
+# imputed_values2 <- mice(data = coachRatings[, top_10_exYears], # Set dataset
+#                         m = 1, # Set number of multiple imputations
+#                         maxit = 10, # Set maximum number of iterations
+#                         method = "cart", # Set method- classification and regression trees, few assumptions
+#                         print = TRUE) # Set whether to print output or not
+# 
+# 
+# 
+# 
+# coachRatings[,top_10_exYears] <- complete(imputed_values2, 1) # Extract imputed data
+# summary(coachRatings[])
+#
+```
+
